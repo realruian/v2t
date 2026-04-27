@@ -13,8 +13,23 @@ from typing import Callable, Optional
 from faster_whisper import WhisperModel
 
 
+def _bundled_resources_dir() -> Path | None:
+    """If running from a py2app bundle, return its Resources dir (where we
+    ship ffmpeg/ffprobe). Otherwise None."""
+    here = Path(__file__).resolve()
+    # In a py2app bundle, this file sits at .../V2T.app/Contents/Resources/
+    if "Contents/Resources" in str(here):
+        return here.parent
+    return None
+
+
 def _find_ffmpeg() -> str:
-    """Locate ffmpeg even when launched from Finder (no shell PATH)."""
+    """Locate ffmpeg, preferring a copy bundled inside the .app."""
+    bundled = _bundled_resources_dir()
+    if bundled:
+        candidate = bundled / "Frameworks" / "ffmpeg"
+        if candidate.exists():
+            return str(candidate)
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -26,16 +41,20 @@ def _find_ffmpeg() -> str:
 
 FFMPEG = None  # lazy
 
-# Local model directory — if present, faster-whisper loads from disk
-# instead of downloading from HuggingFace.
-LOCAL_MODELS_DIR = Path(__file__).parent / "models"
+# Model search order:
+#   1. ~/Library/Application Support/V2T/models/<size>/   (user-installed)
+#   2. <project>/models/<size>/                            (dev/alias mode)
+#   3. fall back to HuggingFace auto-download (faster-whisper default)
+USER_DATA_MODELS = Path.home() / "Library" / "Application Support" / "V2T" / "models"
+PROJECT_MODELS   = Path(__file__).parent / "models"
 
 
 def _resolve_model_id(size: str) -> str:
-    """Prefer local models/<size>/ if it exists; otherwise return the HF ID."""
-    local = LOCAL_MODELS_DIR / size
-    if local.exists() and (local / "model.bin").exists():
-        return str(local)
+    """Return a local path if a model is on disk; otherwise the HF id."""
+    for root in (USER_DATA_MODELS, PROJECT_MODELS):
+        cand = root / size
+        if cand.exists() and (cand / "model.bin").exists():
+            return str(cand)
     return size
 
 
