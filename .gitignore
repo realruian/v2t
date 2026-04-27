@@ -1,0 +1,37 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# ===== Virtual env =====
+.venv/
+venv/
+env/
+
+# ===== Build artifacts =====
+build/
+dist/
+*.app/
+
+# ===== Generated =====
+icon.iconset/
+
+# ===== Local model files (3GB, must not push) =====
+models/
+
+# ===== macOS junk =====
+.DS_Store
+*.swp
+
+# ===== Editor =====
+.vscode/
+.idea/
+.cursor/
+
+# ===== Logs / cache =====
+*.log
+.cache/
+
+# ===== App-generated state =====
+# (state.json lives at ~/.config/V2T/state.json, outside repo, so no rule needed)

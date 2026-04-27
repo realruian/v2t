@@ -1,0 +1,233 @@
+"""Core transcription engine using faster-whisper."""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+from faster_whisper import WhisperModel
+
+
+def _find_ffmpeg() -> str:
+    """Locate ffmpeg even when launched from Finder (no shell PATH)."""
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"):
+        if Path(p).exists():
+            return p
+    raise RuntimeError("未找到 ffmpeg。请先安装：brew install ffmpeg")
+
+
+FFMPEG = None  # lazy
+
+# Local model directory — if present, faster-whisper loads from disk
+# instead of downloading from HuggingFace.
+LOCAL_MODELS_DIR = Path(__file__).parent / "models"
+
+
+def _resolve_model_id(size: str) -> str:
+    """Prefer local models/<size>/ if it exists; otherwise return the HF ID."""
+    local = LOCAL_MODELS_DIR / size
+    if local.exists() and (local / "model.bin").exists():
+        return str(local)
+    return size
+
+
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wma"}
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".wmv", ".m4v"}
+
+
+def is_video(path: Path) -> bool:
+    return path.suffix.lower() in VIDEO_EXTS
+
+
+def extract_audio(video_path: Path, out_dir: Path) -> Path:
+    global FFMPEG
+    if FFMPEG is None:
+        FFMPEG = _find_ffmpeg()
+    out = out_dir / (video_path.stem + ".wav")
+    cmd = [
+        FFMPEG, "-y", "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", str(out),
+        "-loglevel", "error",
+    ]
+    subprocess.run(cmd, check=True)
+    return out
+
+
+def format_timestamp(seconds: float, srt: bool = True) -> str:
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3600_000)
+    m, ms = divmod(ms, 60_000)
+    s, ms = divmod(ms, 1000)
+    sep = "," if srt else "."
+    return f"{h:02d}:{m:02d}:{s:02d}{sep}{ms:03d}"
+
+
+def format_duration_compact(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+class CancelledError(Exception):
+    pass
+
+
+class Transcriber:
+    """Wraps faster-whisper Large-V3. Loads model lazily."""
+
+    def __init__(self, model_size: str = "large-v3", compute_type: str = "int8"):
+        self.model_size = model_size
+        self.compute_type = compute_type
+        self._model: Optional[WhisperModel] = None
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def _check_cancel(self):
+        if self._cancel.is_set():
+            raise CancelledError()
+
+    def load(self, progress: Optional[Callable] = None):
+        if self._model is not None:
+            return
+        model_id = _resolve_model_id(self.model_size)
+        is_local = Path(model_id).exists()
+        if progress:
+            label = "加载本地 Whisper Large-V3 模型…" if is_local \
+                    else "下载 Whisper Large-V3 模型（首次约 3GB）…"
+            progress({"label": label, "indeterminate": True})
+        self._model = WhisperModel(
+            model_id, device="cpu", compute_type=self.compute_type
+        )
+        if progress:
+            progress({"label": "模型已加载", "indeterminate": True})
+
+    def transcribe(
+        self,
+        media_path: str,
+        language: Optional[str] = None,
+        progress: Optional[Callable] = None,
+    ) -> dict:
+        self._cancel.clear()
+        path = Path(media_path).expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(path)
+
+        self.load(progress)
+        self._check_cancel()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            if is_video(path):
+                if progress:
+                    progress({"label": "提取音轨…", "indeterminate": True})
+                audio_path = extract_audio(path, tmp_dir)
+            else:
+                audio_path = path
+            self._check_cancel()
+
+            if progress:
+                progress({"label": "开始转写…", "indeterminate": True})
+
+            segments_iter, info = self._model.transcribe(
+                str(audio_path),
+                language=language if language and language != "auto" else None,
+                vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500},
+                beam_size=5,
+            )
+
+            total = info.duration or 0.0
+            start_time = time.time()
+            segments = []
+            for seg in segments_iter:
+                self._check_cancel()
+                segments.append({
+                    "id": seg.id,
+                    "start": seg.start,
+                    "end": seg.end,
+                    "text": seg.text.strip(),
+                })
+                if progress and total:
+                    pct = min(99, seg.end / total * 100)
+                    elapsed = time.time() - start_time
+                    eta = ""
+                    if pct > 1:
+                        remaining = elapsed * (100 - pct) / pct
+                        eta = f"剩余约 {format_duration_compact(remaining)}"
+                    progress({
+                        "pct": pct,
+                        "eta": eta,
+                        "label": f"转写中 · {format_timestamp(seg.end, False)} / {format_timestamp(total, False)}",
+                    })
+
+            return {
+                "language": info.language,
+                "duration": total,
+                "segments": segments,
+                "text": "\n".join(s["text"] for s in segments),
+                "source": str(path),
+            }
+
+
+def to_srt(segments: list[dict]) -> str:
+    out = []
+    for i, s in enumerate(segments, 1):
+        out.append(str(i))
+        out.append(f"{format_timestamp(s['start'])} --> {format_timestamp(s['end'])}")
+        out.append(s["text"])
+        out.append("")
+    return "\n".join(out)
+
+
+def to_vtt(segments: list[dict]) -> str:
+    out = ["WEBVTT", ""]
+    for s in segments:
+        out.append(f"{format_timestamp(s['start'], False)} --> {format_timestamp(s['end'], False)}")
+        out.append(s["text"])
+        out.append("")
+    return "\n".join(out)
+
+
+def to_markdown(result: dict) -> str:
+    src = Path(result["source"]).name
+    lines = [
+        f"# {src}", "",
+        f"- 语言: {result['language']}",
+        f"- 时长: {format_timestamp(result['duration'], False)}",
+        "", "---", "",
+    ]
+    for s in result["segments"]:
+        lines.append(f"**[{format_timestamp(s['start'], False)}]** {s['text']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def save_outputs(result: dict, out_dir: str) -> dict:
+    out = Path(out_dir).expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    stem = Path(result["source"]).stem
+    paths = {
+        "txt": out / f"{stem}.txt",
+        "srt": out / f"{stem}.srt",
+        "vtt": out / f"{stem}.vtt",
+        "md":  out / f"{stem}.md",
+    }
+    paths["txt"].write_text(result["text"], encoding="utf-8")
+    paths["srt"].write_text(to_srt(result["segments"]), encoding="utf-8")
+    paths["vtt"].write_text(to_vtt(result["segments"]), encoding="utf-8")
+    paths["md"].write_text(to_markdown(result), encoding="utf-8")
+    return {k: str(v) for k, v in paths.items()}
