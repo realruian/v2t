@@ -215,18 +215,18 @@ body[data-state="hasItems"] [data-show]:not([data-show~="hasItems"]) { display: 
 .qi[draggable="true"] { cursor: grab; }
 .qi[draggable="true"]:active { cursor: grabbing; }
 
-/* drag grip (only for queued) */
+/* drag grip — always visible on queued, dim → bright on hover */
 .qi-grip {
   position: absolute;
   left: 4px;
   top: 50%;
   transform: translateY(-50%);
   color: var(--text-muted);
-  opacity: 0;
+  opacity: 0.35;
   transition: opacity 100ms ease;
   pointer-events: none;
 }
-.qi[data-status="queued"]:hover .qi-grip { opacity: 0.6; }
+.qi[data-status="queued"]:hover .qi-grip { opacity: 0.75; }
 .qi[data-status="queued"] .qi-header { padding-left: 18px; }
 
 .qi-header {
@@ -556,6 +556,82 @@ select:focus-visible, input[type="text"]:focus-visible {
 .icon-btn:hover  { background: var(--surface-3); color: var(--text); }
 .icon-btn:active { background: var(--border); }
 .icon-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft-2); }
+
+/* ---------- Model download banner ---------- */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--accent-soft-2);
+  flex-shrink: 0;
+}
+.banner-icon {
+  width: 32px; height: 32px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+.banner-body { flex: 1; min-width: 0; }
+.banner-title { font-size: var(--fs-body); font-weight: 600; color: var(--text); }
+.banner-sub   { font-size: var(--fs-aux); color: var(--text-muted); margin-top: 2px; }
+.banner-actions { display: flex; gap: var(--s-1); flex-shrink: 0; }
+
+.banner-progress {
+  margin-top: var(--s-1);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.banner-bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+@media (prefers-color-scheme: dark) {
+  .banner-bar { background: rgba(255, 255, 255, 0.12); }
+}
+.banner-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width 200ms ease;
+}
+.banner-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-aux);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Version label in status bar */
+.version {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* Probing badge animation */
+.qi-badge.probing::after {
+  content: "";
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-left: 2px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.85); }
+  50%      { opacity: 1;   transform: scale(1.1);  }
+}
 
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {

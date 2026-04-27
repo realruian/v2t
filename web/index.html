@@ -34,6 +34,31 @@
     </button>
   </header>
 
+  <!-- ============ Model banner (shown when model missing) ============ -->
+  <div id="modelBanner" class="banner" hidden>
+    <div class="banner-icon" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    </div>
+    <div class="banner-body">
+      <div class="banner-title" id="bannerTitle">Whisper 模型未安装</div>
+      <div class="banner-sub" id="bannerSub">需要下载约 3GB 的语音识别模型才能开始转写。</div>
+      <div class="banner-progress" id="bannerProgress" hidden>
+        <div class="banner-bar"><div class="banner-fill" id="bannerFill"></div></div>
+        <div class="banner-meta">
+          <span id="bannerProgressText">0%</span>
+          <span id="bannerProgressFile"></span>
+        </div>
+      </div>
+    </div>
+    <div class="banner-actions" id="bannerActions">
+      <button class="btn small" id="bannerOpenDirBtn">打开目录</button>
+      <button class="btn small primary" id="bannerDownloadBtn">立即下载</button>
+    </div>
+    <div class="banner-actions" id="bannerCancelActions" hidden>
+      <button class="btn small ghost" id="bannerCancelBtn">取消</button>
+    </div>
+  </div>
+
   <!-- ============ Content ============ -->
   <main class="content">
 
@@ -62,6 +87,7 @@
       <button class="btn ghost small" id="clearDoneBtn" hidden>清除已完成</button>
       <button class="btn ghost small" id="cancelAllBtn" hidden>全部取消</button>
     </div>
+    <span class="version" id="version"></span>
   </footer>
 
   <script src="app.js"></script>

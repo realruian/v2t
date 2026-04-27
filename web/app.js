@@ -18,6 +18,20 @@ const queueWrap    = queueList.parentElement;
 const stats        = $("stats");
 const clearDoneBtn = $("clearDoneBtn");
 const cancelAllBtn = $("cancelAllBtn");
+const versionEl    = $("version");
+
+const modelBanner  = $("modelBanner");
+const bannerTitle  = $("bannerTitle");
+const bannerSub    = $("bannerSub");
+const bannerProgress = $("bannerProgress");
+const bannerFill   = $("bannerFill");
+const bannerProgressText = $("bannerProgressText");
+const bannerProgressFile = $("bannerProgressFile");
+const bannerActions = $("bannerActions");
+const bannerCancelActions = $("bannerCancelActions");
+const bannerOpenDirBtn = $("bannerOpenDirBtn");
+const bannerDownloadBtn = $("bannerDownloadBtn");
+const bannerCancelBtn = $("bannerCancelBtn");
 
 // ---------- State ----------
 const state = {
@@ -102,6 +116,7 @@ async function addPaths(paths) {
       type: fileType(p),
       status: "queued",
       expanded: false,
+      probing: true,           // ← shown until probe completes
       size: 0,
       sourceDuration: 0,
     };
@@ -120,12 +135,14 @@ async function addPaths(paths) {
       const meta = await window.pywebview.api.probe_media(it.path);
       it.size = meta.size || 0;
       it.sourceDuration = meta.duration || 0;
-      // Only re-render if still in queue (not completed/removed)
+    } catch {}
+    finally {
+      it.probing = false;
       if (state.items.includes(it)) {
         renderItem(it);
         saveState();
       }
-    } catch {}
+    }
   }));
 }
 
@@ -441,7 +458,10 @@ function buildPreviewHtml(item) {
 
 function badgeHtml(item) {
   switch (item.status) {
-    case "queued":    return `<span class="qi-badge">等待中</span>`;
+    case "queued":
+      return item.probing
+        ? `<span class="qi-badge probing">分析中</span>`
+        : `<span class="qi-badge">等待中</span>`;
     case "running":   return `<span class="qi-badge">转写中</span>`;
     case "done":      return `<span class="qi-badge">✓ 完成</span>`;
     case "error":     return `<span class="qi-badge">⚠ 错误</span>`;
@@ -609,7 +629,79 @@ let toastTimer = null;
 function toast(msg) {
   stats.textContent = msg;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(updateStats, 1600);
+  toastTimer = setTimeout(updateStats, 2500);
+}
+
+// ============================================================
+// Model banner — first-run model download UX
+// ============================================================
+let modelPollTimer = null;
+
+async function checkModelStatus() {
+  await waitForApi();
+  try {
+    const s = await window.pywebview.api.model_status();
+    if (s && s.installed) {
+      modelBanner.hidden = true;
+      return true;
+    }
+    modelBanner.hidden = false;
+    bannerTitle.textContent = "Whisper 模型未安装";
+    bannerSub.textContent = "需要约 3GB。点击「立即下载」从 hf-mirror.com 拉取，或自行放入指定目录。";
+    bannerProgress.hidden = true;
+    bannerActions.hidden = false;
+    bannerCancelActions.hidden = true;
+    return false;
+  } catch { return false; }
+}
+
+bannerOpenDirBtn.addEventListener("click", async () => {
+  await waitForApi();
+  await window.pywebview.api.reveal_models_dir();
+});
+
+bannerDownloadBtn.addEventListener("click", async () => {
+  await waitForApi();
+  const ok = await window.pywebview.api.start_model_download();
+  if (!ok) return;
+  bannerTitle.textContent = "正在下载模型…";
+  bannerSub.textContent = "首次下载，约 3GB；网速好时 1-5 分钟，慢时 10-30 分钟。";
+  bannerProgress.hidden = false;
+  bannerActions.hidden = true;
+  bannerCancelActions.hidden = false;
+  pollModelDownload();
+});
+
+bannerCancelBtn.addEventListener("click", async () => {
+  await waitForApi();
+  await window.pywebview.api.cancel_model_download();
+});
+
+function pollModelDownload() {
+  if (modelPollTimer) clearInterval(modelPollTimer);
+  modelPollTimer = setInterval(async () => {
+    try {
+      const s = await window.pywebview.api.model_download_progress();
+      const pct = s.pct || 0;
+      bannerFill.style.width = pct + "%";
+      bannerProgressText.textContent = `${pct.toFixed(1)}%  ·  ${formatBytes(s.bytes_done)} / ${formatBytes(s.bytes_total)}`;
+      bannerProgressFile.textContent = s.current_file || "";
+      if (s.done) {
+        clearInterval(modelPollTimer); modelPollTimer = null;
+        modelBanner.hidden = true;
+        toast("✅ 模型下载完成");
+      } else if (s.error) {
+        clearInterval(modelPollTimer); modelPollTimer = null;
+        bannerTitle.textContent = "下载失败";
+        bannerSub.textContent = s.error;
+        bannerProgress.hidden = true;
+        bannerActions.hidden = false;
+        bannerCancelActions.hidden = true;
+      } else if (!s.active) {
+        clearInterval(modelPollTimer); modelPollTimer = null;
+      }
+    } catch {}
+  }, 600);
 }
 
 // ============================================================
@@ -665,13 +757,23 @@ document.addEventListener("keydown", (e) => {
 // ============================================================
 (async () => {
   await waitForApi();
+
+  // Show app version in status bar
+  try {
+    const info = await window.pywebview.api.app_info();
+    if (info && info.version) versionEl.textContent = `v${info.version}`;
+  } catch {}
+
   state.outputDir = await window.pywebview.api.default_output_dir();
-  await loadState(); // may overwrite outputDir / language / items
+  await loadState();
   if (!state.outputDir) {
     state.outputDir = await window.pywebview.api.default_output_dir();
   }
   setOutDir(state.outputDir);
   language.value = state.language;
   render();
-  scheduleNext(); // resume any queued items from previous session
+  scheduleNext();
+
+  // Check model presence after main UI is up
+  checkModelStatus();
 })();

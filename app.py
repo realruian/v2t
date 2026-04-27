@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -15,10 +16,18 @@ from transcribe import Transcriber, save_outputs, CancelledError, _find_ffmpeg
 
 STATE_FILE = Path.home() / ".config" / "V2T" / "state.json"
 
+APP_VERSION = "0.1.1"
+
+USER_MODELS_DIR = Path.home() / "Library" / "Application Support" / "V2T" / "models"
+MODEL_FILES = ["config.json", "model.bin", "preprocessor_config.json",
+               "tokenizer.json", "vocabulary.json"]
+MODEL_BYTES_TOTAL = 3_086_000_000  # approx, for progress estimation
+HF_MIRROR_BASE = "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/main"
+
 
 HERE = Path(__file__).parent.resolve()
 WEB_DIR = HERE / "web"
-DEFAULT_OUT_DIR = Path.home() / "Desktop" / "V2T-Output"
+DEFAULT_OUT_DIR = Path.home() / "Documents" / "V2T-Output"
 
 
 def macos_notify(title: str, message: str):
@@ -39,6 +48,15 @@ class Api:
     def __init__(self):
         self.transcriber = Transcriber(model_size="large-v3", compute_type="int8")
         self._window: webview.Window | None = None
+        self._dl_state = {
+            "active": False,
+            "done": False,
+            "error": None,
+            "current_file": "",
+            "bytes_done": 0,
+            "bytes_total": MODEL_BYTES_TOTAL,
+        }
+        self._dl_proc = None
 
     def bind_window(self, window: webview.Window):
         self._window = window
@@ -130,6 +148,115 @@ class Api:
         except Exception:
             pass
         return None
+
+    def app_info(self):
+        return {"version": APP_VERSION}
+
+    # ---- Model management ----
+    def _model_install_dir(self) -> Path:
+        return USER_MODELS_DIR / "large-v3"
+
+    def model_status(self):
+        """Report whether a usable Whisper Large-V3 model is on disk."""
+        # search across the same paths transcribe._resolve_model_id checks
+        from transcribe import USER_DATA_MODELS, PROJECT_MODELS
+        for root in (USER_DATA_MODELS, PROJECT_MODELS):
+            cand = root / "large-v3"
+            if cand.exists() and (cand / "model.bin").exists():
+                return {"installed": True, "path": str(cand)}
+        return {"installed": False, "install_to": str(self._model_install_dir())}
+
+    def start_model_download(self):
+        """Download model files to USER_MODELS_DIR/large-v3 in a worker thread.
+        UI polls progress via model_download_progress()."""
+        if self._dl_state["active"]:
+            return False
+        self._dl_state.update({
+            "active": True, "done": False, "error": None,
+            "current_file": "", "bytes_done": 0,
+        })
+
+        def worker():
+            try:
+                target = self._model_install_dir()
+                target.mkdir(parents=True, exist_ok=True)
+                cumulative = 0
+                # Pre-compute remote sizes via HEAD (best effort) for accurate %
+                sizes = {}
+                for f in MODEL_FILES:
+                    try:
+                        r = subprocess.run(
+                            ["curl", "-sIL", f"{HF_MIRROR_BASE}/{f}"],
+                            capture_output=True, text=True, timeout=15,
+                        )
+                        for line in r.stdout.splitlines()[::-1]:
+                            if line.lower().startswith("content-length:"):
+                                sizes[f] = int(line.split(":")[1].strip()); break
+                    except Exception:
+                        pass
+                total = sum(sizes.values()) or MODEL_BYTES_TOTAL
+                self._dl_state["bytes_total"] = total
+
+                for f in MODEL_FILES:
+                    self._dl_state["current_file"] = f
+                    out = target / f
+                    if out.exists() and out.stat().st_size > 0 and \
+                       sizes.get(f) and out.stat().st_size == sizes[f]:
+                        cumulative += out.stat().st_size
+                        self._dl_state["bytes_done"] = cumulative
+                        continue
+
+                    # curl with resume support
+                    proc = subprocess.Popen(
+                        ["curl", "-L", "-C", "-", "--fail", "--silent",
+                         "-o", str(out), f"{HF_MIRROR_BASE}/{f}"],
+                    )
+                    self._dl_proc = proc
+                    while proc.poll() is None:
+                        try:
+                            cur = out.stat().st_size if out.exists() else 0
+                        except Exception:
+                            cur = 0
+                        self._dl_state["bytes_done"] = cumulative + cur
+                        time.sleep(0.4)
+                    self._dl_proc = None
+                    if proc.returncode != 0:
+                        raise RuntimeError(f"下载 {f} 失败（curl 返回 {proc.returncode}）")
+                    cumulative += out.stat().st_size
+                    self._dl_state["bytes_done"] = cumulative
+
+                self._dl_state["done"] = True
+                self._dl_state["active"] = False
+                macos_notify("V2T 模型已就绪", "可以开始转写了")
+            except Exception as e:
+                traceback.print_exc()
+                self._dl_state["error"] = f"{type(e).__name__}: {e}"
+                self._dl_state["active"] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def model_download_progress(self):
+        s = self._dl_state
+        total = s["bytes_total"] or 1
+        pct = max(0.0, min(100.0, s["bytes_done"] * 100.0 / total))
+        return {**s, "pct": pct}
+
+    def cancel_model_download(self):
+        if self._dl_proc is not None:
+            try: self._dl_proc.terminate()
+            except Exception: pass
+        self._dl_state["active"] = False
+        self._dl_state["error"] = "已取消"
+        return True
+
+    def reveal_models_dir(self):
+        d = self._model_install_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(["open", str(d)], check=False)
+        except Exception:
+            pass
 
     def cancel(self):
         self.transcriber.cancel()
