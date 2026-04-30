@@ -26,7 +26,7 @@ from transcribe import (
 
 STATE_FILE = Path.home() / ".config" / "V2T" / "state.json"
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 
 USER_MODELS_DIR = Path.home() / "Library" / "Application Support" / "V2T" / "models"
 MODEL_FILES = list(REQUIRED_MODEL_FILES)
