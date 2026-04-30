@@ -2,10 +2,23 @@
 # Build V2T.app via py2app.
 #   bash build_app.sh             # alias (fast; .app links to this folder)
 #   bash build_app.sh standalone  # full bundle (slow; portable)
+#   bash build_app.sh --no-open   # build without opening Finder
 set -e
 cd "$(dirname "$0")"
 
-MODE="${1:-alias}"
+MODE="alias"
+OPEN_DIST=1
+
+for arg in "$@"; do
+  case "$arg" in
+    standalone) MODE="standalone" ;;
+    --no-open) OPEN_DIST=0 ;;
+    *)
+      echo "未知参数：$arg"
+      exit 1
+      ;;
+  esac
+done
 
 if [ ! -d ".venv" ]; then
   echo "→ 先跑一次 setup.sh 安装依赖"
@@ -38,7 +51,9 @@ if [ -d "$APP_PATH" ]; then
   echo "  1. 在 Finder 中打开 dist/，把 V2T.app 拖到 /Applications 或 Dock"
   echo "  2. 双击启动；首次启动如提示安全警告，右键 → 打开"
   echo ""
-  open "$(dirname "$APP_PATH")"
+  if [ "$OPEN_DIST" = "1" ]; then
+    open "$(dirname "$APP_PATH")"
+  fi
 else
   echo "❌ 打包失败"
   exit 1

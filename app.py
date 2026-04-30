@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -11,7 +13,15 @@ from pathlib import Path
 
 import webview
 
-from transcribe import Transcriber, save_outputs, CancelledError, _find_ffmpeg
+from transcribe import (
+    Transcriber,
+    save_outputs,
+    _find_ffmpeg,
+    REQUIRED_MODEL_FILES,
+    USER_DATA_MODELS,
+    PROJECT_MODELS,
+    model_is_complete,
+)
 
 
 STATE_FILE = Path.home() / ".config" / "V2T" / "state.json"
@@ -19,8 +29,7 @@ STATE_FILE = Path.home() / ".config" / "V2T" / "state.json"
 APP_VERSION = "0.1.1"
 
 USER_MODELS_DIR = Path.home() / "Library" / "Application Support" / "V2T" / "models"
-MODEL_FILES = ["config.json", "model.bin", "preprocessor_config.json",
-               "tokenizer.json", "vocabulary.json"]
+MODEL_FILES = list(REQUIRED_MODEL_FILES)
 MODEL_BYTES_TOTAL = 3_086_000_000  # approx, for progress estimation
 HF_MIRROR_BASE = "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/main"
 
@@ -42,21 +51,52 @@ def macos_notify(title: str, message: str):
         pass
 
 
+def _transcribe_process(media_path: str, language: str, output_dir: str, event_queue):
+    """Run one transcription in an isolated process so cancellation can be hard-stop."""
+    try:
+        transcriber = Transcriber(model_size="large-v3", compute_type="int8")
+        event_queue.put(("status", "running"))
+        result = transcriber.transcribe(
+            media_path,
+            language=language,
+            progress=lambda p: event_queue.put(("progress", p)),
+        )
+        event_queue.put(("progress", {"label": "写出文件…", "pct": 99}))
+        paths = save_outputs(result, output_dir)
+        event_queue.put(("done", {
+            "language": result["language"],
+            "duration": result["duration"],
+            "text": result["text"],
+            "segments": result["segments"],
+            "files": paths,
+        }))
+    except Exception as e:
+        traceback.print_exc()
+        event_queue.put(("error", f"{type(e).__name__}: {e}"))
+
+
 class Api:
     """Bridge object exposed to the JS frontend."""
 
     def __init__(self):
-        self.transcriber = Transcriber(model_size="large-v3", compute_type="int8")
         self._window: webview.Window | None = None
+        self._mp_ctx = multiprocessing.get_context("spawn")
+        self._task_proc = None
+        self._task_queue = None
+        self._task_lock = threading.Lock()
+        self._cancel_requested = False
         self._dl_state = {
             "active": False,
             "done": False,
+            "cancelled": False,
             "error": None,
             "current_file": "",
             "bytes_done": 0,
             "bytes_total": MODEL_BYTES_TOTAL,
         }
         self._dl_proc = None
+        self._dl_lock = threading.Lock()
+        self._dl_cancel_requested = False
 
     def bind_window(self, window: webview.Window):
         self._window = window
@@ -136,7 +176,9 @@ class Api:
     def save_state(self, data):
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps(data, ensure_ascii=False))
+            tmp = STATE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(STATE_FILE)
             return True
         except Exception:
             return False
@@ -144,10 +186,32 @@ class Api:
     def load_state(self):
         try:
             if STATE_FILE.exists():
-                return json.loads(STATE_FILE.read_text())
+                return json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
         return None
+
+    def load_result(self, files):
+        """Load a completed transcript preview from its sidecar JSON."""
+        try:
+            if not files:
+                return None
+            json_path = files.get("json") if isinstance(files, dict) else None
+            if not json_path:
+                return None
+            p = Path(json_path).expanduser()
+            if not p.exists():
+                return None
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return {
+                "language": data.get("language", ""),
+                "duration": data.get("duration", 0),
+                "text": data.get("text", ""),
+                "segments": data.get("segments", []),
+                "files": files,
+            }
+        except Exception:
+            return None
 
     def app_info(self):
         return {"version": APP_VERSION}
@@ -158,23 +222,38 @@ class Api:
 
     def model_status(self):
         """Report whether a usable Whisper Large-V3 model is on disk."""
-        # search across the same paths transcribe._resolve_model_id checks
-        from transcribe import USER_DATA_MODELS, PROJECT_MODELS
+        partial = None
         for root in (USER_DATA_MODELS, PROJECT_MODELS):
             cand = root / "large-v3"
-            if cand.exists() and (cand / "model.bin").exists():
+            if model_is_complete(cand):
                 return {"installed": True, "path": str(cand)}
+            if cand.exists():
+                missing = [
+                    name for name in MODEL_FILES
+                    if not (cand / name).exists() or (cand / name).stat().st_size <= 0
+                ]
+                partial = partial or {
+                    "installed": False,
+                    "partial": True,
+                    "path": str(cand),
+                    "missing": missing,
+                    "install_to": str(self._model_install_dir()),
+                }
+        if partial:
+            return partial
         return {"installed": False, "install_to": str(self._model_install_dir())}
 
     def start_model_download(self):
         """Download model files to USER_MODELS_DIR/large-v3 in a worker thread.
         UI polls progress via model_download_progress()."""
-        if self._dl_state["active"]:
-            return False
-        self._dl_state.update({
-            "active": True, "done": False, "error": None,
-            "current_file": "", "bytes_done": 0,
-        })
+        with self._dl_lock:
+            if self._dl_state["active"]:
+                return False
+            self._dl_cancel_requested = False
+            self._dl_state.update({
+                "active": True, "done": False, "cancelled": False, "error": None,
+                "current_file": "", "bytes_done": 0,
+            })
 
         def worker():
             try:
@@ -198,6 +277,8 @@ class Api:
                 self._dl_state["bytes_total"] = total
 
                 for f in MODEL_FILES:
+                    if self._dl_cancel_requested:
+                        raise InterruptedError("已取消")
                     self._dl_state["current_file"] = f
                     out = target / f
                     if out.exists() and out.stat().st_size > 0 and \
@@ -220,14 +301,22 @@ class Api:
                         self._dl_state["bytes_done"] = cumulative + cur
                         time.sleep(0.4)
                     self._dl_proc = None
+                    if self._dl_cancel_requested:
+                        raise InterruptedError("已取消")
                     if proc.returncode != 0:
                         raise RuntimeError(f"下载 {f} 失败（curl 返回 {proc.returncode}）")
                     cumulative += out.stat().st_size
                     self._dl_state["bytes_done"] = cumulative
 
+                if not model_is_complete(target):
+                    raise RuntimeError("模型文件不完整，请重新下载")
                 self._dl_state["done"] = True
                 self._dl_state["active"] = False
                 macos_notify("V2T 模型已就绪", "可以开始转写了")
+            except InterruptedError:
+                self._dl_state["cancelled"] = True
+                self._dl_state["error"] = None
+                self._dl_state["active"] = False
             except Exception as e:
                 traceback.print_exc()
                 self._dl_state["error"] = f"{type(e).__name__}: {e}"
@@ -243,11 +332,13 @@ class Api:
         return {**s, "pct": pct}
 
     def cancel_model_download(self):
+        self._dl_cancel_requested = True
         if self._dl_proc is not None:
             try: self._dl_proc.terminate()
             except Exception: pass
         self._dl_state["active"] = False
-        self._dl_state["error"] = "已取消"
+        self._dl_state["cancelled"] = True
+        self._dl_state["error"] = None
         return True
 
     def reveal_models_dir(self):
@@ -259,35 +350,68 @@ class Api:
             pass
 
     def cancel(self):
-        self.transcriber.cancel()
+        with self._task_lock:
+            self._cancel_requested = True
+            proc = self._task_proc
+        if proc is not None and proc.is_alive():
+            proc.terminate()
         return True
 
     def transcribe(self, media_path: str, language: str, output_dir: str):
-        def worker():
-            try:
-                self._emit("status", "running")
-                result = self.transcriber.transcribe(
-                    media_path,
-                    language=language,
-                    progress=lambda p: self._emit("progress", p),
-                )
-                self._emit("progress", {"label": "写出文件…", "pct": 99})
-                paths = save_outputs(result, output_dir)
-                self._emit("done", {
-                    "language": result["language"],
-                    "duration": result["duration"],
-                    "text": result["text"],
-                    "segments": result["segments"],
-                    "files": paths,
-                })
-                macos_notify("V2T 转写完成", Path(media_path).name)
-            except CancelledError:
-                self._emit("cancelled", None)
-            except Exception as e:
-                traceback.print_exc()
-                self._emit("error", f"{type(e).__name__}: {e}")
+        with self._task_lock:
+            if self._task_proc is not None and self._task_proc.is_alive():
+                return False
+            self._cancel_requested = False
+            self._task_queue = self._mp_ctx.Queue()
+            self._task_proc = self._mp_ctx.Process(
+                target=_transcribe_process,
+                args=(media_path, language, output_dir, self._task_queue),
+                daemon=True,
+            )
+            self._task_proc.start()
+            proc = self._task_proc
+            event_queue = self._task_queue
 
-        threading.Thread(target=worker, daemon=True).start()
+        def monitor():
+            terminal_seen = False
+            terminal_event = None
+            while True:
+                timeout = 0.2 if proc.is_alive() else 0
+                try:
+                    event, payload = event_queue.get(timeout=timeout)
+                    self._emit(event, payload)
+                    if event == "done":
+                        terminal_seen = True
+                        terminal_event = event
+                        macos_notify("V2T 转写完成", Path(media_path).name)
+                    if event in ("error", "cancelled"):
+                        terminal_seen = True
+                        terminal_event = event
+                    if terminal_seen:
+                        break
+                except queue.Empty:
+                    if not proc.is_alive():
+                        break
+
+            if proc.is_alive() and terminal_event in ("done", "error", "cancelled"):
+                proc.join(timeout=1)
+
+            proc.join(timeout=1)
+            with self._task_lock:
+                was_cancelled = self._cancel_requested
+                if self._task_proc is proc:
+                    self._task_proc = None
+                    self._task_queue = None
+                    self._cancel_requested = False
+
+            if not terminal_seen:
+                if was_cancelled:
+                    self._emit("cancelled", None)
+                else:
+                    code = proc.exitcode
+                    self._emit("error", f"转写进程异常退出（exit code {code}）")
+
+        threading.Thread(target=monitor, daemon=True).start()
         return True
 
 
@@ -310,4 +434,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

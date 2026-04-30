@@ -19,6 +19,7 @@ const stats        = $("stats");
 const clearDoneBtn = $("clearDoneBtn");
 const cancelAllBtn = $("cancelAllBtn");
 const versionEl    = $("version");
+const toastEl      = $("toast");
 
 const modelBanner  = $("modelBanner");
 const bannerTitle  = $("bannerTitle");
@@ -42,7 +43,6 @@ const state = {
 };
 
 const VIDEO_EXT = new Set(["mp4","mov","mkv","avi","webm","flv","wmv","m4v"]);
-const SAVE_KEYS = ["language", "outputDir"];
 
 // ---------- Helpers ----------
 function fileType(p) {
@@ -50,6 +50,14 @@ function fileType(p) {
   return VIDEO_EXT.has(ext) ? "video" : "audio";
 }
 function basename(p) { return p ? p.split("/").pop() : ""; }
+function compactDirname(p) {
+  if (!p) return "";
+  const parts = p.split("/").filter(Boolean);
+  if (parts.length <= 1) return "";
+  const dirs = parts.slice(0, -1);
+  if (dirs.length <= 2) return "/" + dirs.join("/");
+  return "…/" + dirs.slice(-2).join("/");
+}
 function uid() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -91,14 +99,17 @@ async function waitForApi() {
 }
 
 // ---------- Icons ----------
-const ICON_AUDIO = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 11v2M21 12h0"/></svg>`;
-const ICON_VIDEO = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>`;
-const ICON_X     = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
-const ICON_RETRY = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15A9 9 0 1 1 5.64 5.64L1 10"/></svg>`;
-const ICON_FOLDER = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
-const ICON_CHEVRON_DOWN = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
-const ICON_CHEVRON_UP   = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`;
-const ICON_GRIP = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>`;
+function icon(paths, size = 16) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+}
+const ICON_AUDIO = icon(`<path d="M4 12h2"/><path d="M8 8v8"/><path d="M12 5v14"/><path d="M16 8v8"/><path d="M20 11v2"/>`);
+const ICON_VIDEO = icon(`<rect x="3" y="6" width="13" height="12" rx="2.5"/><path d="m16 10 5-3v10l-5-3z"/>`);
+const ICON_X = icon(`<path d="M18 6 6 18"/><path d="m6 6 12 12"/>`, 15);
+const ICON_RETRY = icon(`<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/>`, 15);
+const ICON_FOLDER = icon(`<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4l2 2.5h7A2.5 2.5 0 0 1 21 10v6.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>`, 15);
+const ICON_CHEVRON_DOWN = icon(`<path d="m7 10 5 5 5-5"/>`, 15);
+const ICON_CHEVRON_UP = icon(`<path d="m7 14 5-5 5 5"/>`, 15);
+const ICON_GRIP = `<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.45"/><circle cx="15" cy="6" r="1.45"/><circle cx="9" cy="12" r="1.45"/><circle cx="15" cy="12" r="1.45"/><circle cx="9" cy="18" r="1.45"/><circle cx="15" cy="18" r="1.45"/></svg>`;
 
 // ============================================================
 // Add files (with metadata probe)
@@ -201,15 +212,45 @@ dropzone.addEventListener("keydown", (e) => {
 // ============================================================
 // Scheduling
 // ============================================================
+async function ensureOutputDir() {
+  if (state.outputDir) return true;
+  await waitForApi();
+  try {
+    const dir = await window.pywebview.api.default_output_dir();
+    if (dir) {
+      setOutDir(dir);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 async function scheduleNext() {
   if (state.currentId) return;
-  if (!state.outputDir) return;
+  if (!(await ensureOutputDir())) {
+    toast("请先选择输出目录");
+    return;
+  }
   const next = state.items.find(x => x.status === "queued");
   if (!next) return;
 
   await waitForApi();
+  try {
+    const model = await window.pywebview.api.model_status();
+    if (!model || !model.installed) {
+      next.blockedReason = "等待模型";
+      renderItem(next);
+      updateStats();
+      checkModelStatus();
+      toast(model && model.partial ? "模型文件不完整，请重新下载" : "请先下载 Whisper 模型");
+      return;
+    }
+  } catch {}
+
   state.currentId = next.id;
   next.status = "running";
+  next.blockedReason = "";
+  next.cancelling = false;
   next.progress = 0;
   next.progressLabel = "准备中…";
   next.etaText = "";
@@ -218,7 +259,18 @@ async function scheduleNext() {
   updateStats();
   saveState();
 
-  window.pywebview.api.transcribe(next.path, state.language, state.outputDir);
+  try {
+    const started = await window.pywebview.api.transcribe(next.path, state.language, state.outputDir);
+    if (started === false) throw new Error("后端未能启动转写任务");
+  } catch (e) {
+    next.status = "error";
+    next.errorMsg = e && e.message ? e.message : String(e || "启动转写失败");
+    state.currentId = null;
+    renderItem(next);
+    updateStats();
+    saveState();
+    scheduleNext();
+  }
 }
 const findItem = (id) => state.items.find(x => x.id === id);
 const findCurrent = () => state.currentId ? findItem(state.currentId) : null;
@@ -281,6 +333,14 @@ window.__onPyEvent = function (evt) {
 // ============================================================
 async function cancelItem(id) {
   if (id !== state.currentId) return;
+  const it = findItem(id);
+  if (it) {
+    it.cancelling = true;
+    it.indeterminate = true;
+    it.progressLabel = "正在取消…";
+    renderItem(it);
+    saveState();
+  }
   await waitForApi();
   await window.pywebview.api.cancel();
 }
@@ -296,6 +356,8 @@ function retryItem(id) {
   if (!it) return;
   it.status = "queued";
   it.errorMsg = undefined;
+  it.blockedReason = "";
+  it.cancelling = false;
   it.progress = 0;
   it.expanded = false;
   renderItem(it);
@@ -303,9 +365,25 @@ function retryItem(id) {
   saveState();
   scheduleNext();
 }
-function toggleExpand(id) {
+async function loadResultForItem(item) {
+  if (!item || item.status !== "done") return false;
+  const r = item.result || {};
+  if (Array.isArray(r.segments) || r.text) return true;
+  await waitForApi();
+  const loaded = await window.pywebview.api.load_result(r.files || item.files || {});
+  if (!loaded) {
+    toast("无法读取转写预览文件");
+    return false;
+  }
+  item.result = loaded;
+  saveState();
+  return true;
+}
+
+async function toggleExpand(id) {
   const it = findItem(id);
   if (!it || it.status !== "done") return;
+  if (!it.expanded && !(await loadResultForItem(it))) return;
   it.expanded = !it.expanded;
   renderItem(it);
 }
@@ -373,12 +451,13 @@ function buildItemNode(item) {
   const actions = actionsHtml(item);
 
   // sub-line: path + (duration · size) when known
-  const subParts = [item.path];
+  const dir = compactDirname(item.path);
+  const subParts = dir ? [dir] : [];
   const metaParts = [];
   if (item.sourceDuration > 0) metaParts.push(formatHMS(item.sourceDuration));
   if (item.size > 0) metaParts.push(formatBytes(item.size));
   if (metaParts.length) subParts.push(metaParts.join(" · "));
-  const subLine = subParts.join("  ·  ");
+  const subLine = subParts.join("  ·  ") || item.path;
 
   let progressHtml = "";
   if (item.status === "running") {
@@ -459,10 +538,11 @@ function buildPreviewHtml(item) {
 function badgeHtml(item) {
   switch (item.status) {
     case "queued":
+      if (item.blockedReason) return `<span class="qi-badge">${escapeHtml(item.blockedReason)}</span>`;
       return item.probing
         ? `<span class="qi-badge probing">分析中</span>`
         : `<span class="qi-badge">等待中</span>`;
-    case "running":   return `<span class="qi-badge">转写中</span>`;
+    case "running":   return `<span class="qi-badge">${item.cancelling ? "正在取消" : "转写中"}</span>`;
     case "done":      return `<span class="qi-badge">✓ 完成</span>`;
     case "error":     return `<span class="qi-badge">⚠ 错误</span>`;
     case "cancelled": return `<span class="qi-badge">已取消</span>`;
@@ -474,7 +554,7 @@ function actionsHtml(item) {
     case "queued":
       return `<button class="icon-btn" data-act="remove" aria-label="移除">${ICON_X}</button>`;
     case "running":
-      return `<button class="btn small" data-act="cancel">取消</button>`;
+      return `<button class="btn small" data-act="cancel" ${item.cancelling ? "disabled" : ""}>取消</button>`;
     case "done":
       return `
         <button class="icon-btn" data-act="reveal" title="在 Finder 中显示" aria-label="在 Finder 中显示">${ICON_FOLDER}</button>
@@ -613,12 +693,27 @@ clearDoneBtn.addEventListener("click", () => {
   saveState();
 });
 cancelAllBtn.addEventListener("click", async () => {
+  let changed = false;
+  for (const it of state.items) {
+    if (it.status === "queued") {
+      it.status = "cancelled";
+      it.blockedReason = "";
+      changed = true;
+    }
+  }
   if (state.currentId) {
+    const it = findCurrent();
+    if (it) {
+      it.cancelling = true;
+      it.indeterminate = true;
+      it.progressLabel = "正在取消…";
+      renderItem(it);
+    }
     await waitForApi();
     await window.pywebview.api.cancel();
   }
-  state.items = state.items.filter(x => x.status !== "queued");
-  render();
+  if (changed) render();
+  updateStats();
   saveState();
 });
 
@@ -627,9 +722,14 @@ cancelAllBtn.addEventListener("click", async () => {
 // ============================================================
 let toastTimer = null;
 function toast(msg) {
-  stats.textContent = msg;
+  if (!toastEl) return;
+  toastEl.textContent = msg;
+  toastEl.hidden = false;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(updateStats, 2500);
+  toastTimer = setTimeout(() => {
+    toastEl.hidden = true;
+    toastEl.textContent = "";
+  }, 2500);
 }
 
 // ============================================================
@@ -689,7 +789,15 @@ function pollModelDownload() {
       if (s.done) {
         clearInterval(modelPollTimer); modelPollTimer = null;
         modelBanner.hidden = true;
-        toast("✅ 模型下载完成");
+        toast("模型下载完成");
+        scheduleNext();
+      } else if (s.cancelled) {
+        clearInterval(modelPollTimer); modelPollTimer = null;
+        bannerTitle.textContent = "模型下载已取消";
+        bannerSub.textContent = "需要完整模型后才能开始转写。";
+        bannerProgress.hidden = true;
+        bannerActions.hidden = false;
+        bannerCancelActions.hidden = true;
       } else if (s.error) {
         clearInterval(modelPollTimer); modelPollTimer = null;
         bannerTitle.textContent = "下载失败";
@@ -708,6 +816,31 @@ function pollModelDownload() {
 // Persistence
 // ============================================================
 let saveTimer = null;
+function slimItemForSave(it) {
+  const copy = {
+    id: it.id,
+    path: it.path,
+    name: it.name,
+    type: it.type,
+    status: it.status,
+    expanded: false,
+    probing: !!it.probing,
+    size: it.size || 0,
+    sourceDuration: it.sourceDuration || 0,
+    errorMsg: it.errorMsg,
+    blockedReason: it.blockedReason || "",
+  };
+  if (copy.status === "running") copy.status = "queued";
+  if (it.result) {
+    copy.result = {
+      language: it.result.language || "",
+      duration: it.result.duration || 0,
+      files: it.result.files || {},
+    };
+  }
+  return copy;
+}
+
 async function saveState() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
@@ -717,7 +850,7 @@ async function saveState() {
       version: 1,
       language: state.language,
       outputDir: state.outputDir,
-      items: state.items.map(it => ({ ...it, expanded: false })),
+      items: state.items.map(slimItemForSave),
     };
     try { await window.pywebview.api.save_state(snapshot); } catch {}
   }, 250);
@@ -731,10 +864,12 @@ async function loadState() {
   // Sanitize: anything that was running should be re-queued
   for (const it of saved.items) {
     if (it.status === "running") it.status = "queued";
+    it.probing = false;
     delete it.indeterminate;
     delete it.progress;
     delete it.progressLabel;
     delete it.etaText;
+    delete it.cancelling;
   }
   state.items    = saved.items;
   state.language = saved.language || "auto";

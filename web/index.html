@@ -10,14 +10,14 @@
 
   <!-- ============ Top bar ============ -->
   <header class="topbar">
-    <button class="btn primary" id="addBtn">
+    <button class="btn primary add-file" id="addBtn">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
       添加文件
     </button>
 
     <div class="topbar-spacer"></div>
 
-    <label class="topbar-field">
+    <label class="topbar-field control-group">
       <span class="topbar-field-label">语言</span>
       <select id="language" aria-label="转写语言">
         <option value="auto">自动识别</option>
@@ -28,10 +28,15 @@
       </select>
     </label>
 
-    <button class="btn topbar-outdir" id="pickOut" aria-label="选择输出目录" title="">
+    <button class="btn topbar-outdir control-group" id="pickOut" aria-label="选择输出目录" title="">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       <span id="outDirShort">输出目录</span>
     </button>
+
+    <div class="topbar-actions">
+      <button class="btn ghost small" id="clearDoneBtn" hidden>清除已完成</button>
+      <button class="btn ghost small danger" id="cancelAllBtn" hidden>停止全部</button>
+    </div>
   </header>
 
   <!-- ============ Model banner (shown when model missing) ============ -->
@@ -68,8 +73,12 @@
         <div class="dz-icon" aria-hidden="true">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         </div>
-        <div class="dz-title">拖入音视频文件</div>
-        <div class="dz-sub">支持多选 · mp3 · wav · m4a · mp4 · mov · mkv 等</div>
+        <div class="dz-copy">
+          <div class="dz-kicker">本地转写队列</div>
+          <div class="dz-title">拖入音视频文件</div>
+          <div class="dz-sub">也可以点击选择文件，支持多选</div>
+        </div>
+        <button class="btn primary dz-action" type="button" tabindex="-1">选择文件</button>
       </div>
     </section>
 
@@ -80,13 +89,11 @@
 
   </main>
 
+  <div class="toast" id="toast" hidden role="status" aria-live="polite"></div>
+
   <!-- ============ Status bar ============ -->
   <footer class="statusbar">
     <span class="stats" id="stats" aria-live="polite">队列为空</span>
-    <div class="statusbar-actions">
-      <button class="btn ghost small" id="clearDoneBtn" hidden>清除已完成</button>
-      <button class="btn ghost small" id="cancelAllBtn" hidden>全部取消</button>
-    </div>
     <span class="version" id="version"></span>
   </footer>
 

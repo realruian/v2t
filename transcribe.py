@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -44,18 +46,38 @@ FFMPEG = None  # lazy
 # Model search order:
 #   1. ~/Library/Application Support/V2T/models/<size>/   (user-installed)
 #   2. <project>/models/<size>/                            (dev/alias mode)
-#   3. fall back to HuggingFace auto-download (faster-whisper default)
 USER_DATA_MODELS = Path.home() / "Library" / "Application Support" / "V2T" / "models"
 PROJECT_MODELS   = Path(__file__).parent / "models"
+REQUIRED_MODEL_FILES = (
+    "config.json",
+    "model.bin",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "vocabulary.json",
+)
+
+
+class ModelNotInstalledError(RuntimeError):
+    pass
+
+
+def model_is_complete(model_dir: Path) -> bool:
+    return model_dir.exists() and all(
+        (model_dir / name).exists() and (model_dir / name).stat().st_size > 0
+        for name in REQUIRED_MODEL_FILES
+    )
 
 
 def _resolve_model_id(size: str) -> str:
-    """Return a local path if a model is on disk; otherwise the HF id."""
+    """Return a local model path, or raise instead of triggering HF auto-download."""
     for root in (USER_DATA_MODELS, PROJECT_MODELS):
         cand = root / size
-        if cand.exists() and (cand / "model.bin").exists():
+        if model_is_complete(cand):
             return str(cand)
-    return size
+    raise ModelNotInstalledError(
+        "Whisper Large-V3 模型未安装或不完整。请先点击顶部横幅下载模型，"
+        "或运行 bash download_model.sh。"
+    )
 
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".opus", ".wma"}
@@ -235,18 +257,43 @@ def to_markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _unique_output_paths(out_dir: Path, stem: str) -> dict:
+    def paths_for(base: str) -> dict:
+        return {
+            "txt": out_dir / f"{base}.txt",
+            "srt": out_dir / f"{base}.srt",
+            "vtt": out_dir / f"{base}.vtt",
+            "md":  out_dir / f"{base}.md",
+            "json": out_dir / f"{base}.json",
+        }
+
+    paths = paths_for(stem)
+    if not any(p.exists() for p in paths.values()):
+        return paths
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for i in range(100):
+        suffix = f"{timestamp}" if i == 0 else f"{timestamp}-{i + 1}"
+        paths = paths_for(f"{stem}-{suffix}")
+        if not any(p.exists() for p in paths.values()):
+            return paths
+    raise RuntimeError("无法生成不冲突的输出文件名")
+
+
 def save_outputs(result: dict, out_dir: str) -> dict:
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
     stem = Path(result["source"]).stem
-    paths = {
-        "txt": out / f"{stem}.txt",
-        "srt": out / f"{stem}.srt",
-        "vtt": out / f"{stem}.vtt",
-        "md":  out / f"{stem}.md",
-    }
+    paths = _unique_output_paths(out, stem)
     paths["txt"].write_text(result["text"], encoding="utf-8")
     paths["srt"].write_text(to_srt(result["segments"]), encoding="utf-8")
     paths["vtt"].write_text(to_vtt(result["segments"]), encoding="utf-8")
     paths["md"].write_text(to_markdown(result), encoding="utf-8")
+    paths["json"].write_text(json.dumps({
+        "language": result["language"],
+        "duration": result["duration"],
+        "text": result["text"],
+        "segments": result["segments"],
+        "source": result["source"],
+    }, ensure_ascii=False), encoding="utf-8")
     return {k: str(v) for k, v in paths.items()}

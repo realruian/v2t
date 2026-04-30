@@ -35,6 +35,13 @@ for f in "${FILES[@]}"; do
   curl -L -C - --fail --progress-bar -o "$f" "$BASE/$f"
 done
 
+for f in "${FILES[@]}"; do
+  if [ ! -s "$f" ]; then
+    echo "❌ 模型文件不完整：$f"
+    exit 1
+  fi
+done
+
 echo ""
 echo "✅ 下载完成"
 echo ""
